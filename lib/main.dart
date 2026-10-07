@@ -6,9 +6,12 @@ import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 
 import 'core/theme/app_theme.dart';
 import 'features/tasks/screens/home_screen.dart';
+import 'services/notification_services.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await NotificationService.instance.initialize();
+  await NotificationService.instance.requestPermission();
   if (kIsWeb) {
     databaseFactory = databaseFactoryFfiWeb;
   }

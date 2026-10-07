@@ -21,6 +21,8 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
   String _selectedPriority = 'Medium';
   DateTime _selectedStartDate = DateUtils.dateOnly(DateTime.now());
   DateTime? _selectedDueDate;
+  bool _reminderEnabled = false;
+  DateTime? _selectedReminderDate;
   bool _isSaving = false;
   String? _saveError;
 
@@ -103,8 +105,48 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
     }
   }
 
+  Future<void> _selectReminderDateTime() async {
+    final baseDate =
+        _selectedReminderDate ?? DateTime.now().add(const Duration(minutes: 30));
+
+    final pickedDate = await showDatePicker(
+      context: context,
+      initialDate: baseDate,
+      firstDate: DateTime.now().subtract(const Duration(days: 1)),
+      lastDate: DateTime(DateTime.now().year + 5),
+      helpText: 'Select reminder date',
+    );
+
+    if (!mounted || pickedDate == null) return;
+
+    final pickedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(baseDate),
+      helpText: 'Select reminder time',
+    );
+
+    if (!mounted || pickedTime == null) return;
+
+    setState(() {
+      _selectedReminderDate = DateTime(
+        pickedDate.year,
+        pickedDate.month,
+        pickedDate.day,
+        pickedTime.hour,
+        pickedTime.minute,
+      );
+    });
+  }
+
   Future<void> _saveTask() async {
     if (_isSaving || !_formKey.currentState!.validate()) {
+      return;
+    }
+
+    if (_reminderEnabled && _selectedReminderDate == null) {
+      setState(() {
+        _saveError = 'Please select a reminder date and time.';
+      });
       return;
     }
 
@@ -115,13 +157,15 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
 
     try {
       await ref.read(taskProvider.notifier).addTask(
-          title: _titleController.text.trim(),
-          description: _descriptionController.text.trim(),
-          category: _selectedCategory,
-          priority: _selectedPriority,
-          startDate: _selectedStartDate,
-          dueDate: _selectedDueDate,
-        );
+        title: _titleController.text.trim(),
+        description: _descriptionController.text.trim(),
+        category: _selectedCategory,
+        priority: _selectedPriority,
+        startDate: _selectedStartDate,
+        dueDate: _selectedDueDate,
+        reminderEnabled: _reminderEnabled,
+        reminderDate: _reminderEnabled ? _selectedReminderDate : null,
+      );
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -140,6 +184,11 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
     return '${date.day.toString().padLeft(2, '0')}/'
         '${date.month.toString().padLeft(2, '0')}/'
         '${date.year}';
+  }
+
+  String _formatDateTime(DateTime date) {
+    final time = TimeOfDay.fromDateTime(date);
+    return '${_formatDate(date)} • ${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
   }
 
   @override
@@ -407,6 +456,121 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
 
               const SizedBox(height: 20),
 
+              // Reminder toggle
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: const Color(0xFFE5E7EB),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.notifications_active_rounded,
+                      color: AppTheme.primary,
+                    ),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        'Enable reminder',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    Switch(
+                      value: _reminderEnabled,
+                      activeThumbColor: AppTheme.primary,
+                      onChanged: (value) {
+                        setState(() {
+                          _reminderEnabled = value;
+                          if (!value) {
+                            _selectedReminderDate = null;
+                          } else {
+                            _selectedReminderDate ??= DateTime.now().add(
+                              const Duration(minutes: 30),
+                            );
+                          }
+                        });
+                      },
+                    ),
+                  ],
+                ),
+              ),
+
+              if (_reminderEnabled) ...[
+                const SizedBox(height: 20),
+                const Text(
+                  'Reminder date & time',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                InkWell(
+                  onTap: _selectReminderDateTime,
+                  borderRadius: BorderRadius.circular(14),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 17,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: const Color(0xFFE5E7EB),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(9),
+                          decoration: BoxDecoration(
+                            color: AppTheme.primary.withValues(alpha: 0.10),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Icon(
+                            Icons.access_time_rounded,
+                            color: AppTheme.primary,
+                            size: 20,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            _selectedReminderDate == null
+                                ? 'Choose reminder time'
+                                : _formatDateTime(_selectedReminderDate!),
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                              color: _selectedReminderDate == null
+                                  ? Colors.grey
+                                  : AppTheme.text,
+                            ),
+                          ),
+                        ),
+                        const Icon(
+                          Icons.arrow_forward_ios_rounded,
+                          size: 15,
+                          color: Colors.grey,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+
+              const SizedBox(height: 20),
+
               // Due date
               const Text(
                 'Due date',
@@ -471,6 +635,8 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                   ),
                 ),
               ),
+
+
 
               const SizedBox(height: 35),
 

@@ -16,7 +16,7 @@ class TaskDatabase {
 
     _database = await openDatabase(
       dbPath,
-      version: 2,
+      version: 3,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE tasks (
@@ -27,7 +27,9 @@ class TaskDatabase {
             priority TEXT NOT NULL,
             startDate INTEGER NOT NULL,
             dueDate INTEGER,
-            isCompleted INTEGER NOT NULL DEFAULT 0
+            isCompleted INTEGER NOT NULL DEFAULT 0,
+            reminderDate INTEGER,
+            reminderEnabled INTEGER NOT NULL DEFAULT 0
           )
         ''');
       },
@@ -36,10 +38,22 @@ class TaskDatabase {
           await db.execute(
             'ALTER TABLE tasks ADD COLUMN startDate INTEGER NOT NULL DEFAULT 0',
           );
-          await db.update(
-            'tasks',
-            {'startDate': DateTime.now().millisecondsSinceEpoch},
-            where: 'startDate = 0',
+          await db.execute(
+            '''
+           UPDATE tasks
+           SET startDate = ?
+           WHERE startDate = 0
+            ''',
+            [DateTime.now().millisecondsSinceEpoch],
+          );
+        }
+
+        if (oldVersion < 3) {
+          await db.execute(
+            'ALTER TABLE tasks ADD COLUMN reminderDate INTEGER',
+          );
+          await db.execute(
+            'ALTER TABLE tasks ADD COLUMN reminderEnabled INTEGER NOT NULL DEFAULT 0',
           );
         }
       },
@@ -70,10 +84,6 @@ class TaskDatabase {
 
   Future<void> deleteTask(String id) async {
     final db = await database;
-    await db.delete(
-      'tasks',
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+    await db.delete('tasks', where: 'id = ?', whereArgs: [id]);
   }
 }

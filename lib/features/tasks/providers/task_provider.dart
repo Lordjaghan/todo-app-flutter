@@ -4,6 +4,7 @@ import 'package:uuid/uuid.dart';
 import '../../../data/datasources/task_database.dart';
 import '../../../data/models/task.dart';
 import '../../../data/repositories/task_repository.dart';
+import '../../../services/notification_services.dart';
 
 final taskRepositoryProvider = Provider<TaskRepository>((ref) {
   return TaskRepository(TaskDatabase());
@@ -30,6 +31,8 @@ class TaskNotifier extends AsyncNotifier<List<Task>> {
     String priority = 'Medium',
     required DateTime startDate,
     DateTime? dueDate,
+    bool reminderEnabled = false,
+    DateTime? reminderDate,
   }) async {
     final task = Task(
       id: const Uuid().v4(),
@@ -39,9 +42,20 @@ class TaskNotifier extends AsyncNotifier<List<Task>> {
       priority: priority,
       startDate: startDate,
       dueDate: dueDate,
+      reminderEnabled: reminderEnabled,
+      reminderDate: reminderDate,
     );
 
     await _repository.saveTask(task);
+
+    if (reminderEnabled && reminderDate != null) {
+      await NotificationService.instance.scheduleTaskReminder(
+        taskId: task.id.hashCode,
+        title: title,
+        reminderDate: reminderDate,
+      );
+    }
+
     state = AsyncData(await _repository.getTasks());
   }
 
@@ -54,6 +68,7 @@ class TaskNotifier extends AsyncNotifier<List<Task>> {
   }
 
   Future<void> removeTask(String id) async {
+    await NotificationService.instance.cancelTaskReminder(id.hashCode);
     await _repository.deleteTask(id);
     state = AsyncData(await _repository.getTasks());
   }
