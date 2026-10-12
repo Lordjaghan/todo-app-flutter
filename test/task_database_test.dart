@@ -40,6 +40,14 @@ void main() {
             'category': 'Personal',
             'priority': 'Medium',
           });
+          await db.insert('tasks', {
+            'id': 'legacy-completed',
+            'title': 'Completed legacy task',
+            'description': '',
+            'category': 'Personal',
+            'priority': 'Medium',
+            'isCompleted': 1,
+          });
         },
       ),
     );
@@ -47,14 +55,25 @@ void main() {
 
     final database = TaskDatabase();
     final migratedTasks = await database.getTasks();
-    expect(migratedTasks, hasLength(1));
-    expect(migratedTasks.single.startDate.millisecondsSinceEpoch, greaterThan(0));
+    expect(migratedTasks, hasLength(2));
+    final legacyTask = migratedTasks.singleWhere((task) => task.id == 'legacy');
+    final legacyCompletedTask = migratedTasks.singleWhere(
+      (task) => task.id == 'legacy-completed',
+    );
+    expect(legacyTask.startDate.millisecondsSinceEpoch, greaterThan(0));
+    expect(legacyTask.status, TaskStatus.inProgress);
+    expect(legacyCompletedTask.status, TaskStatus.completed);
 
     final task = Task(
       id: 'new',
       title: 'New task',
       startDate: DateTime(2026, 10, 5),
       dueDate: DateTime(2026, 10, 8),
+      reminderDate: DateTime(2026, 10, 7, 9, 30),
+      reminderEnabled: true,
+      reminderType: ReminderType.alarm,
+      notificationId: 12345,
+      status: TaskStatus.onHold,
     );
     await database.saveTask(task);
 
@@ -62,6 +81,11 @@ void main() {
     final savedTask = savedTasks.singleWhere((item) => item.id == 'new');
     expect(savedTask.startDate, task.startDate);
     expect(savedTask.dueDate, task.dueDate);
+    expect(savedTask.reminderDate, task.reminderDate);
+    expect(savedTask.reminderEnabled, isTrue);
+    expect(savedTask.reminderType, ReminderType.alarm);
+    expect(savedTask.notificationId, 12345);
+    expect(savedTask.status, TaskStatus.onHold);
 
     final openedDatabase = await databaseFactoryFfi.openDatabase(databasePath);
     await openedDatabase.close();

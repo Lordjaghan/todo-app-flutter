@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 
 import '../../../core/theme/app_theme.dart';
 import '../../../data/models/task.dart';
+import '../../../services/notification_services.dart';
 import '../providers/task_provider.dart';
 import '../widgets/task_card.dart';
 import 'add_task_screen.dart';
@@ -30,9 +31,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   void _openAddTaskScreen() {
     Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (_) => const AddTaskScreen(),
-      ),
+      MaterialPageRoute(builder: (_) => const AddTaskScreen()),
+    );
+  }
+
+  void _openEditTaskScreen(Task task) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => AddTaskScreen(task: task)),
     );
   }
 
@@ -48,13 +54,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         return AlertDialog(
           title: const Text(
             'Delete task?',
-            style: TextStyle(
-              fontWeight: FontWeight.w700,
-            ),
+            style: TextStyle(fontWeight: FontWeight.w700),
           ),
-          content: Text(
-            'Are you sure you want to delete "${task.title}"?',
-          ),
+          content: Text('Are you sure you want to delete "${task.title}"?'),
           actions: [
             TextButton(
               onPressed: () {
@@ -77,9 +79,104 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
 
     if (shouldDelete == true) {
-      await ref
-          .read(taskProvider.notifier)
-          .removeTask(task.id);
+      await ref.read(taskProvider.notifier).removeTask(task.id);
+    }
+  }
+
+  Future<void> _changeTaskStatus(Task task, TaskStatus status) async {
+    if (status == task.status) return;
+    final notifier = ref.read(taskProvider.notifier);
+    if (status == TaskStatus.completed) {
+      await notifier.setTaskStatus(task, status);
+      return;
+    }
+
+    final shouldSetReminder = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Set a reminder for ${status.label.toLowerCase()}?'),
+        content: const Text(
+          'You can set an exact date and time or continue without a reminder.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('No'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Yes'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || shouldSetReminder == null) return;
+
+    DateTime? reminderDate;
+    if (shouldSetReminder) {
+      final now = DateTime.now();
+      final initialDate =
+          task.reminderDate ?? now.add(const Duration(minutes: 30));
+      final date = await showDatePicker(
+        context: context,
+        initialDate: DateTime(
+          initialDate.year,
+          initialDate.month,
+          initialDate.day,
+        ),
+        firstDate: DateUtils.dateOnly(now),
+        lastDate: DateTime(now.year + 5),
+        helpText: 'Select reminder date',
+      );
+      if (!mounted || date == null) return;
+      final time = await showTimePicker(
+        context: context,
+        initialTime: TimeOfDay.fromDateTime(initialDate),
+        helpText: 'Select reminder time',
+      );
+      if (!mounted || time == null) return;
+      reminderDate = DateTime(
+        date.year,
+        date.month,
+        date.day,
+        time.hour,
+        time.minute,
+      );
+      if (!reminderDate.isAfter(DateTime.now())) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Choose a reminder time in the future.'),
+          ),
+        );
+        return;
+      }
+    }
+
+    try {
+      await notifier.setTaskStatus(
+        task,
+        status,
+        reminderEnabled: shouldSetReminder,
+        reminderDate: reminderDate,
+      );
+    } on ExactAlarmPermissionDeniedException {
+      await notifier.setTaskStatus(task, status, reminderDate: reminderDate);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Saved without an alarm. The task card will show when it is due.',
+            ),
+          ),
+        );
+      }
+    } on NotificationPermissionDeniedException {
+      await notifier.setTaskStatus(task, status, reminderDate: reminderDate);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Saved without a notification.')),
+        );
+      }
     }
   }
 
@@ -88,11 +185,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       return tasks;
     }
 
-    return tasks
-        .where(
-          (task) => task.category == _selectedFilter,
-        )
-        .toList();
+    return tasks.where((task) => task.category == _selectedFilter).toList();
   }
 
   @override
@@ -101,9 +194,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     final today = DateTime.now();
 
-    final formattedDate = DateFormat(
-      'EEEE, d MMMM',
-    ).format(today);
+    final formattedDate = DateFormat('EEEE, d MMMM').format(today);
 
     return Scaffold(
       backgroundColor: AppTheme.background,
@@ -112,9 +203,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         child: tasksAsync.when(
           loading: () {
             return const Center(
-              child: CircularProgressIndicator(
-                color: AppTheme.primary,
-              ),
+              child: CircularProgressIndicator(color: AppTheme.primary),
             );
           },
 
@@ -128,13 +217,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
           data: (tasks) {
             final completedTasks = tasks
-                .where(
-                  (task) => task.isCompleted,
-                )
+                .where((task) => task.status == TaskStatus.completed)
                 .length;
-
-            final pendingTasks =
-                tasks.length - completedTasks;
+            final onHoldTasks = tasks
+                .where((task) => task.status == TaskStatus.onHold)
+                .length;
+            final inProgressTasks = tasks
+                .where((task) => task.status == TaskStatus.inProgress)
+                .length;
 
             final progress = tasks.isEmpty
                 ? 0.0
@@ -155,23 +245,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   // --------------------------------------------------
 
                   SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(
-                      20,
-                      20,
-                      20,
-                      0,
-                    ),
+                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
 
                     sliver: SliverToBoxAdapter(
                       child: Row(
-                        crossAxisAlignment:
-                            CrossAxisAlignment.start,
+                        crossAxisAlignment: CrossAxisAlignment.start,
 
                         children: [
                           Expanded(
                             child: Column(
-                              crossAxisAlignment:
-                                  CrossAxisAlignment.start,
+                              crossAxisAlignment: CrossAxisAlignment.start,
 
                               children: [
                                 Text(
@@ -214,12 +297,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
                             decoration: BoxDecoration(
                               color: Colors.white,
-                              borderRadius:
-                                  BorderRadius.circular(15),
+                              borderRadius: BorderRadius.circular(15),
 
                               border: Border.all(
-                                color:
-                                    const Color(0xFFEAEAF2),
+                                color: const Color(0xFFEAEAF2),
                               ),
                             ),
 
@@ -236,14 +317,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   // --------------------------------------------------
                   // PROGRESS CARD
                   // --------------------------------------------------
-
                   SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(
-                      20,
-                      24,
-                      20,
-                      0,
-                    ),
+                    padding: const EdgeInsets.fromLTRB(20, 24, 20, 0),
 
                     sliver: SliverToBoxAdapter(
                       child: Container(
@@ -254,19 +329,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                             begin: Alignment.topLeft,
                             end: Alignment.bottomRight,
 
-                            colors: [
-                              Color(0xFF756CFF),
-                              Color(0xFF5B52E8),
-                            ],
+                            colors: [Color(0xFF756CFF), Color(0xFF5B52E8)],
                           ),
 
-                          borderRadius:
-                              BorderRadius.circular(24),
+                          borderRadius: BorderRadius.circular(24),
 
                           boxShadow: [
                             BoxShadow(
-                              color: AppTheme.primary
-                                  .withValues(alpha: 0.20),
+                              color: AppTheme.primary.withValues(alpha: 0.20),
 
                               blurRadius: 25,
 
@@ -276,8 +346,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         ),
 
                         child: Column(
-                          crossAxisAlignment:
-                              CrossAxisAlignment.start,
+                          crossAxisAlignment: CrossAxisAlignment.start,
 
                           children: [
                             Row(
@@ -293,8 +362,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                         style: TextStyle(
                                           color: Colors.white70,
                                           fontSize: 11,
-                                          fontWeight:
-                                              FontWeight.w700,
+                                          fontWeight: FontWeight.w700,
                                           letterSpacing: 1.2,
                                         ),
                                       ),
@@ -306,8 +374,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                         style: TextStyle(
                                           color: Colors.white,
                                           fontSize: 22,
-                                          fontWeight:
-                                              FontWeight.w800,
+                                          fontWeight: FontWeight.w800,
                                         ),
                                       ),
                                     ],
@@ -318,12 +385,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                   width: 58,
                                   height: 58,
 
-                                  decoration:
-                                      BoxDecoration(
-                                    color: Colors.white
-                                        .withValues(
-                                      alpha: 0.15,
-                                    ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withValues(alpha: 0.15),
 
                                     shape: BoxShape.circle,
                                   ),
@@ -331,12 +394,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                   child: Center(
                                     child: Text(
                                       '${(progress * 100).round()}%',
-                                      style:
-                                          const TextStyle(
+                                      style: const TextStyle(
                                         color: Colors.white,
                                         fontSize: 14,
-                                        fontWeight:
-                                            FontWeight.w800,
+                                        fontWeight: FontWeight.w800,
                                       ),
                                     ),
                                   ),
@@ -347,18 +408,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                             const SizedBox(height: 22),
 
                             ClipRRect(
-                              borderRadius:
-                                  BorderRadius.circular(20),
+                              borderRadius: BorderRadius.circular(20),
 
-                              child:
-                                  LinearProgressIndicator(
+                              child: LinearProgressIndicator(
                                 value: progress,
 
                                 minHeight: 8,
 
-                                backgroundColor:
-                                    Colors.white
-                                        .withValues(
+                                backgroundColor: Colors.white.withValues(
                                   alpha: 0.20,
                                 ),
 
@@ -373,24 +430,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                 Expanded(
                                   child: Text(
                                     '$completedTasks completed',
-                                    style:
-                                        const TextStyle(
+                                    style: const TextStyle(
                                       color: Colors.white70,
                                       fontSize: 12,
-                                      fontWeight:
-                                          FontWeight.w500,
+                                      fontWeight: FontWeight.w500,
                                     ),
                                   ),
                                 ),
 
                                 Text(
-                                  '$pendingTasks remaining',
-                                  style:
-                                      const TextStyle(
+                                  '$inProgressTasks in progress',
+                                  style: const TextStyle(
                                     color: Colors.white70,
                                     fontSize: 12,
-                                    fontWeight:
-                                        FontWeight.w500,
+                                    fontWeight: FontWeight.w500,
                                   ),
                                 ),
                               ],
@@ -404,14 +457,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   // --------------------------------------------------
                   // STATISTICS
                   // --------------------------------------------------
-
                   SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(
-                      20,
-                      16,
-                      20,
-                      0,
-                    ),
+                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
 
                     sliver: SliverToBoxAdapter(
                       child: Row(
@@ -421,8 +468,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                               icon: Icons.check_circle_outline_rounded,
                               title: 'Completed',
                               value: '$completedTasks',
-                              iconColor:
-                                  const Color(0xFF16A34A),
+                              iconColor: const Color(0xFF16A34A),
                             ),
                           ),
 
@@ -431,10 +477,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           Expanded(
                             child: _StatCard(
                               icon: Icons.pending_actions_rounded,
-                              title: 'Pending',
-                              value: '$pendingTasks',
-                              iconColor:
-                                  const Color(0xFFF59E0B),
+                              title: 'In Progress',
+                              value: '$inProgressTasks',
+                              iconColor: const Color(0xFFF59E0B),
                             ),
                           ),
 
@@ -442,11 +487,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
                           Expanded(
                             child: _StatCard(
-                              icon: Icons.list_alt_rounded,
-                              title: 'Total',
-                              value: '${tasks.length}',
-                              iconColor:
-                                  AppTheme.primary,
+                              icon: Icons.pause_circle_outline_rounded,
+                              title: 'On Hold',
+                              value: '$onHoldTasks',
+                              iconColor: const Color(0xFFCA8A04),
                             ),
                           ),
                         ],
@@ -457,14 +501,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   // --------------------------------------------------
                   // TASK HEADER
                   // --------------------------------------------------
-
                   SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(
-                      20,
-                      28,
-                      20,
-                      0,
-                    ),
+                    padding: const EdgeInsets.fromLTRB(20, 28, 20, 0),
 
                     sliver: SliverToBoxAdapter(
                       child: Row(
@@ -474,8 +512,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                               'My Tasks',
                               style: TextStyle(
                                 fontSize: 20,
-                                fontWeight:
-                                    FontWeight.w800,
+                                fontWeight: FontWeight.w800,
                                 letterSpacing: -0.3,
                               ),
                             ),
@@ -497,34 +534,23 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   // --------------------------------------------------
                   // FILTERS
                   // --------------------------------------------------
-
                   SliverToBoxAdapter(
                     child: SizedBox(
                       height: 58,
 
                       child: ListView.separated(
-                        padding:
-                            const EdgeInsets.fromLTRB(
-                          20,
-                          14,
-                          20,
-                          8,
-                        ),
+                        padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
 
                         scrollDirection: Axis.horizontal,
 
                         itemCount: _filters.length,
 
-                        separatorBuilder: (_, _) =>
-                            const SizedBox(width: 8),
+                        separatorBuilder: (_, _) => const SizedBox(width: 8),
 
                         itemBuilder: (context, index) {
-                          final filter =
-                              _filters[index];
+                          final filter = _filters[index];
 
-                          final selected =
-                              _selectedFilter ==
-                                  filter;
+                          final selected = _selectedFilter == filter;
 
                           return ChoiceChip(
                             label: Text(filter),
@@ -533,22 +559,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
                             onSelected: (_) {
                               setState(() {
-                                _selectedFilter =
-                                    filter;
+                                _selectedFilter = filter;
                               });
                             },
 
-                            selectedColor:
-                                AppTheme.primary
-                                    .withValues(
+                            selectedColor: AppTheme.primary.withValues(
                               alpha: 0.12,
                             ),
 
-                            backgroundColor:
-                                Colors.white,
+                            backgroundColor: Colors.white,
 
-                            checkmarkColor:
-                                AppTheme.primary,
+                            checkmarkColor: AppTheme.primary,
 
                             labelStyle: TextStyle(
                               color: selected
@@ -565,17 +586,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                             side: BorderSide(
                               color: selected
                                   ? AppTheme.primary
-                                  : const Color(
-                                      0xFFE5E7EB,
-                                    ),
+                                  : const Color(0xFFE5E7EB),
                             ),
 
-                            shape:
-                                RoundedRectangleBorder(
-                              borderRadius:
-                                  BorderRadius.circular(
-                                12,
-                              ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
                             ),
                           );
                         },
@@ -586,64 +601,43 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   // --------------------------------------------------
                   // TASK LIST
                   // --------------------------------------------------
-
                   if (filteredTasks.isEmpty)
-
                     SliverFillRemaining(
                       hasScrollBody: false,
 
                       child: _EmptyTasks(
                         filter: _selectedFilter,
-                        onAddTask:
-                            _openAddTaskScreen,
+                        onAddTask: _openAddTaskScreen,
                       ),
                     )
-
                   else
-
                     SliverPadding(
-                      padding: const EdgeInsets.fromLTRB(
-                        20,
-                        8,
-                        20,
-                        110,
-                      ),
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 110),
 
                       sliver: SliverList(
-                        delegate:
-                            SliverChildBuilderDelegate(
-                          (context, index) {
-                            final task =
-                                filteredTasks[index];
+                        delegate: SliverChildBuilderDelegate((context, index) {
+                          final task = filteredTasks[index];
 
-                            return Padding(
-                              padding:
-                                  const EdgeInsets.only(
-                                bottom: 12,
-                              ),
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
 
-                              child: TaskCard(
-                                task: task,
+                            child: TaskCard(
+                              task: task,
 
-                                onToggle: () {
-                                  ref
-                                      .read(
-                                        taskProvider
-                                            .notifier,
-                                      )
-                                      .toggleTask(task);
-                                },
+                              onEdit: () {
+                                _openEditTaskScreen(task);
+                              },
 
-                                onDelete: () {
-                                  _deleteTask(task);
-                                },
-                              ),
-                            );
-                          },
+                              onStatusChanged: (status) {
+                                _changeTaskStatus(task, status);
+                              },
 
-                          childCount:
-                              filteredTasks.length,
-                        ),
+                              onDelete: () {
+                                _deleteTask(task);
+                              },
+                            ),
+                          );
+                        }, childCount: filteredTasks.length),
                       ),
                     ),
                 ],
@@ -656,9 +650,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       // --------------------------------------------------
       // ADD TASK BUTTON
       // --------------------------------------------------
-
-      floatingActionButton:
-          FloatingActionButton.extended(
+      floatingActionButton: FloatingActionButton.extended(
         onPressed: _openAddTaskScreen,
 
         backgroundColor: AppTheme.primary,
@@ -667,15 +659,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
         elevation: 5,
 
-        icon: const Icon(
-          Icons.add_rounded,
-        ),
+        icon: const Icon(Icons.add_rounded),
 
         label: const Text(
           'Add task',
-          style: TextStyle(
-            fontWeight: FontWeight.w700,
-          ),
+          style: TextStyle(fontWeight: FontWeight.w700),
         ),
       ),
     );
@@ -709,14 +697,11 @@ class _StatCard extends StatelessWidget {
 
         borderRadius: BorderRadius.circular(18),
 
-        border: Border.all(
-          color: const Color(0xFFEAEAF2),
-        ),
+        border: Border.all(color: const Color(0xFFEAEAF2)),
       ),
 
       child: Column(
-        crossAxisAlignment:
-            CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
 
         children: [
           Container(
@@ -724,29 +709,19 @@ class _StatCard extends StatelessWidget {
             height: 34,
 
             decoration: BoxDecoration(
-              color: iconColor.withValues(
-                alpha: 0.10,
-              ),
+              color: iconColor.withValues(alpha: 0.10),
 
-              borderRadius:
-                  BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(10),
             ),
 
-            child: Icon(
-              icon,
-              size: 18,
-              color: iconColor,
-            ),
+            child: Icon(icon, size: 18, color: iconColor),
           ),
 
           const SizedBox(height: 12),
 
           Text(
             value,
-            style: const TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w800,
-            ),
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
           ),
 
           const SizedBox(height: 2),
@@ -773,10 +748,7 @@ class _EmptyTasks extends StatelessWidget {
   final String filter;
   final VoidCallback onAddTask;
 
-  const _EmptyTasks({
-    required this.filter,
-    required this.onAddTask,
-  });
+  const _EmptyTasks({required this.filter, required this.onAddTask});
 
   @override
   Widget build(BuildContext context) {
@@ -787,8 +759,7 @@ class _EmptyTasks extends StatelessWidget {
         padding: const EdgeInsets.all(30),
 
         child: Column(
-          mainAxisAlignment:
-              MainAxisAlignment.center,
+          mainAxisAlignment: MainAxisAlignment.center,
 
           children: [
             Container(
@@ -796,9 +767,7 @@ class _EmptyTasks extends StatelessWidget {
               height: 85,
 
               decoration: BoxDecoration(
-                color: AppTheme.primary.withValues(
-                  alpha: 0.08,
-                ),
+                color: AppTheme.primary.withValues(alpha: 0.08),
 
                 shape: BoxShape.circle,
               ),
@@ -813,13 +782,8 @@ class _EmptyTasks extends StatelessWidget {
             const SizedBox(height: 20),
 
             Text(
-              isFiltered
-                  ? 'No $filter tasks'
-                  : 'No tasks yet',
-              style: const TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.w800,
-              ),
+              isFiltered ? 'No $filter tasks' : 'No tasks yet',
+              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
             ),
 
             const SizedBox(height: 8),
@@ -843,13 +807,9 @@ class _EmptyTasks extends StatelessWidget {
               FilledButton.icon(
                 onPressed: onAddTask,
 
-                icon: const Icon(
-                  Icons.add_rounded,
-                ),
+                icon: const Icon(Icons.add_rounded),
 
-                label: const Text(
-                  'Create task',
-                ),
+                label: const Text('Create task'),
               ),
           ],
         ),
@@ -865,9 +825,7 @@ class _EmptyTasks extends StatelessWidget {
 class _ErrorState extends StatelessWidget {
   final VoidCallback onRetry;
 
-  const _ErrorState({
-    required this.onRetry,
-  });
+  const _ErrorState({required this.onRetry});
 
   @override
   Widget build(BuildContext context) {
@@ -879,39 +837,25 @@ class _ErrorState extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
 
           children: [
-            const Icon(
-              Icons.cloud_off_rounded,
-              size: 55,
-              color: Colors.grey,
-            ),
+            const Icon(Icons.cloud_off_rounded, size: 55, color: Colors.grey),
 
             const SizedBox(height: 16),
 
             const Text(
               'Something went wrong',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w700,
-              ),
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
             ),
 
             const SizedBox(height: 8),
 
             const Text(
               'We couldn\'t load your tasks.',
-              style: TextStyle(
-                color: Colors.grey,
-              ),
+              style: TextStyle(color: Colors.grey),
             ),
 
             const SizedBox(height: 18),
 
-            FilledButton(
-              onPressed: onRetry,
-              child: const Text(
-                'Try again',
-              ),
-            ),
+            FilledButton(onPressed: onRetry, child: const Text('Try again')),
           ],
         ),
       ),

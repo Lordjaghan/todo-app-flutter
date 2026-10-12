@@ -16,7 +16,7 @@ class TaskDatabase {
 
     _database = await openDatabase(
       dbPath,
-      version: 3,
+      version: 5,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE tasks (
@@ -27,9 +27,11 @@ class TaskDatabase {
             priority TEXT NOT NULL,
             startDate INTEGER NOT NULL,
             dueDate INTEGER,
-            isCompleted INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'inProgress',
             reminderDate INTEGER,
-            reminderEnabled INTEGER NOT NULL DEFAULT 0
+            reminderEnabled INTEGER NOT NULL DEFAULT 0,
+            reminderType TEXT NOT NULL DEFAULT 'notification',
+            notificationId INTEGER
           )
         ''');
       },
@@ -49,12 +51,29 @@ class TaskDatabase {
         }
 
         if (oldVersion < 3) {
-          await db.execute(
-            'ALTER TABLE tasks ADD COLUMN reminderDate INTEGER',
-          );
+          await db.execute('ALTER TABLE tasks ADD COLUMN reminderDate INTEGER');
           await db.execute(
             'ALTER TABLE tasks ADD COLUMN reminderEnabled INTEGER NOT NULL DEFAULT 0',
           );
+        }
+
+        if (oldVersion < 4) {
+          await db.execute(
+            "ALTER TABLE tasks ADD COLUMN reminderType TEXT NOT NULL DEFAULT 'notification'",
+          );
+          await db.execute(
+            'ALTER TABLE tasks ADD COLUMN notificationId INTEGER',
+          );
+        }
+
+        if (oldVersion < 5) {
+          await db.execute(
+            "ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'inProgress'",
+          );
+          await db.execute('''
+            UPDATE tasks
+            SET status = CASE WHEN isCompleted = 1 THEN 'completed' ELSE 'inProgress' END
+          ''');
         }
       },
     );
@@ -66,7 +85,14 @@ class TaskDatabase {
     final db = await database;
     final rows = await db.query(
       'tasks',
-      orderBy: 'isCompleted ASC, dueDate ASC',
+      orderBy: '''
+        CASE status
+          WHEN 'completed' THEN 2
+          WHEN 'onHold' THEN 1
+          ELSE 0
+        END,
+        dueDate ASC
+      ''',
     );
 
     return rows.map(Task.fromMap).toList();

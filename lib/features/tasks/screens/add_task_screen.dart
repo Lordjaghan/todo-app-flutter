@@ -2,10 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/theme/app_theme.dart';
+import '../../../data/models/task.dart';
+import '../../../services/notification_services.dart';
 import '../providers/task_provider.dart';
 
 class AddTaskScreen extends ConsumerStatefulWidget {
-  const AddTaskScreen({super.key});
+  const AddTaskScreen({super.key, this.task});
+
+  final Task? task;
 
   @override
   ConsumerState<AddTaskScreen> createState() => _AddTaskScreenState();
@@ -34,11 +38,23 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
     'Health',
   ];
 
-  final List<String> _priorities = [
-    'Low',
-    'Medium',
-    'High',
-  ];
+  final List<String> _priorities = ['Low', 'Medium', 'High'];
+
+  @override
+  void initState() {
+    super.initState();
+    final task = widget.task;
+    if (task == null) return;
+
+    _titleController.text = task.title;
+    _descriptionController.text = task.description;
+    _selectedCategory = task.category;
+    _selectedPriority = task.priority;
+    _selectedStartDate = DateUtils.dateOnly(task.startDate);
+    _selectedDueDate = task.dueDate;
+    _reminderEnabled = task.reminderEnabled;
+    _selectedReminderDate = task.reminderDate;
+  }
 
   @override
   void dispose() {
@@ -59,9 +75,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
       builder: (context, child) {
         return Theme(
           data: Theme.of(context).copyWith(
-            colorScheme: const ColorScheme.light(
-              primary: AppTheme.primary,
-            ),
+            colorScheme: const ColorScheme.light(primary: AppTheme.primary),
           ),
           child: child!,
         );
@@ -89,9 +103,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
       builder: (context, child) {
         return Theme(
           data: Theme.of(context).copyWith(
-            colorScheme: const ColorScheme.light(
-              primary: AppTheme.primary,
-            ),
+            colorScheme: const ColorScheme.light(primary: AppTheme.primary),
           ),
           child: child!,
         );
@@ -107,7 +119,8 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
 
   Future<void> _selectReminderDateTime() async {
     final baseDate =
-        _selectedReminderDate ?? DateTime.now().add(const Duration(minutes: 30));
+        _selectedReminderDate ??
+        DateTime.now().add(const Duration(minutes: 30));
 
     final pickedDate = await showDatePicker(
       context: context,
@@ -149,6 +162,37 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
       });
       return;
     }
+    if (_reminderEnabled && !_selectedReminderDate!.isAfter(DateTime.now())) {
+      setState(() {
+        _saveError = 'Choose a reminder time in the future.';
+      });
+      return;
+    }
+
+    var taskStatus = widget.task?.status ?? TaskStatus.inProgress;
+    if (taskStatus == TaskStatus.completed) {
+      final reopenTask = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Reopen completed task?'),
+          content: const Text(
+            'Reopening this task will set its status to In Progress.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Keep Completed'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Reopen Task'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || reopenTask == null) return;
+      if (reopenTask) taskStatus = TaskStatus.inProgress;
+    }
 
     setState(() {
       _isSaving = true;
@@ -156,21 +200,51 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
     });
 
     try {
-      await ref.read(taskProvider.notifier).addTask(
-        title: _titleController.text.trim(),
-        description: _descriptionController.text.trim(),
-        category: _selectedCategory,
-        priority: _selectedPriority,
-        startDate: _selectedStartDate,
-        dueDate: _selectedDueDate,
-        reminderEnabled: _reminderEnabled,
-        reminderDate: _reminderEnabled ? _selectedReminderDate : null,
-      );
-    } catch (_) {
+      final notifier = ref.read(taskProvider.notifier);
+      final existingTask = widget.task;
+      if (existingTask == null) {
+        await notifier.addTask(
+          title: _titleController.text.trim(),
+          description: _descriptionController.text.trim(),
+          category: _selectedCategory,
+          priority: _selectedPriority,
+          startDate: _selectedStartDate,
+          dueDate: _selectedDueDate,
+          reminderEnabled: _reminderEnabled,
+          reminderDate: _reminderEnabled ? _selectedReminderDate : null,
+          reminderType: ReminderType.alarm,
+        );
+      } else {
+        await notifier.updateTask(
+          Task(
+            id: existingTask.id,
+            title: _titleController.text.trim(),
+            description: _descriptionController.text.trim(),
+            category: _selectedCategory,
+            priority: _selectedPriority,
+            startDate: _selectedStartDate,
+            dueDate: _selectedDueDate,
+            status: taskStatus,
+            reminderEnabled: _reminderEnabled,
+            reminderDate: _reminderEnabled ? _selectedReminderDate : null,
+            reminderType: ReminderType.alarm,
+            notificationId: existingTask.notificationId,
+          ),
+        );
+      }
+    } catch (error) {
       if (!mounted) return;
       setState(() {
         _isSaving = false;
-        _saveError = 'Could not save task. Please try again.';
+        if (error is NotificationPermissionDeniedException) {
+          _saveError = 'Notifications are disabled. Enable them in your device settings to use reminders.';
+        } else if (error is ExactAlarmPermissionDeniedException) {
+          _saveError = 'Exact alarms are disabled. Allow exact alarms in device settings or turn off the reminder to save without an alarm.';
+        } else if (error is ReminderTimeInPastException) {
+          _saveError = 'Choose a reminder time in the future.';
+        } else {
+          _saveError = 'Could not save task. Please try again.';
+        }
       });
       return;
     }
@@ -195,11 +269,9 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text(
-          'Add Task',
-          style: TextStyle(
-            fontWeight: FontWeight.w700,
-          ),
+        title: Text(
+          widget.task == null ? 'Add Task' : 'Edit Task',
+          style: TextStyle(fontWeight: FontWeight.w700),
         ),
         centerTitle: false,
       ),
@@ -208,16 +280,11 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
         child: Form(
           key: _formKey,
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(
-              20,
-              10,
-              20,
-              30,
-            ),
+            padding: const EdgeInsets.fromLTRB(20, 10, 20, 30),
             children: [
               // Header
-              const Text(
-                'Create a new task',
+              Text(
+                widget.task == null ? 'Create a new task' : 'Edit task details',
                 style: TextStyle(
                   fontSize: 26,
                   fontWeight: FontWeight.w800,
@@ -227,12 +294,11 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
 
               const SizedBox(height: 6),
 
-              const Text(
-                'Add the details of what you need to get done.',
-                style: TextStyle(
-                  color: Colors.grey,
-                  fontSize: 14,
-                ),
+              Text(
+                widget.task == null
+                    ? 'Add the details of what you need to get done.'
+                    : 'Update the task details and reminder.',
+                style: TextStyle(color: Colors.grey, fontSize: 14),
               ),
 
               const SizedBox(height: 28),
@@ -240,10 +306,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
               // Task title
               const Text(
                 'Task title',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                ),
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
               ),
 
               const SizedBox(height: 9),
@@ -253,9 +316,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                 textCapitalization: TextCapitalization.sentences,
                 decoration: const InputDecoration(
                   hintText: 'e.g. Complete Flutter project',
-                  prefixIcon: Icon(
-                    Icons.task_alt_rounded,
-                  ),
+                  prefixIcon: Icon(Icons.task_alt_rounded),
                 ),
                 validator: (value) {
                   if (value == null || value.trim().isEmpty) {
@@ -275,10 +336,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
               // Description
               const Text(
                 'Description',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                ),
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
               ),
 
               const SizedBox(height: 9),
@@ -291,9 +349,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                   hintText: 'Add some details...',
                   prefixIcon: Padding(
                     padding: EdgeInsets.only(bottom: 65),
-                    child: Icon(
-                      Icons.notes_rounded,
-                    ),
+                    child: Icon(Icons.notes_rounded),
                   ),
                 ),
               ),
@@ -303,10 +359,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
               // Category
               const Text(
                 'Category',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                ),
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
               ),
 
               const SizedBox(height: 12),
@@ -315,8 +368,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                 spacing: 9,
                 runSpacing: 9,
                 children: _categories.map((category) {
-                  final isSelected =
-                      _selectedCategory == category;
+                  final isSelected = _selectedCategory == category;
 
                   return ChoiceChip(
                     label: Text(category),
@@ -326,8 +378,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                         _selectedCategory = category;
                       });
                     },
-                    selectedColor:
-                        AppTheme.primary.withValues(alpha: 0.15),
+                    selectedColor: AppTheme.primary.withValues(alpha: 0.15),
                     checkmarkColor: AppTheme.primary,
                     labelStyle: TextStyle(
                       color: isSelected
@@ -354,18 +405,14 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
               // Priority
               const Text(
                 'Priority',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                ),
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
               ),
 
               const SizedBox(height: 12),
 
               Row(
                 children: _priorities.map((priority) {
-                  final isSelected =
-                      _selectedPriority == priority;
+                  final isSelected = _selectedPriority == priority;
 
                   return Expanded(
                     child: Padding(
@@ -391,10 +438,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
               // Start date
               const Text(
                 'Start date',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                ),
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
               ),
 
               const SizedBox(height: 10),
@@ -410,18 +454,14 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                   decoration: BoxDecoration(
                     color: Colors.white,
                     borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: const Color(0xFFE5E7EB),
-                    ),
+                    border: Border.all(color: const Color(0xFFE5E7EB)),
                   ),
                   child: Row(
                     children: [
                       Container(
                         padding: const EdgeInsets.all(9),
                         decoration: BoxDecoration(
-                          color: AppTheme.primary.withValues(
-                            alpha: 0.10,
-                          ),
+                          color: AppTheme.primary.withValues(alpha: 0.10),
                           borderRadius: BorderRadius.circular(10),
                         ),
                         child: const Icon(
@@ -465,9 +505,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: const Color(0xFFE5E7EB),
-                  ),
+                  border: Border.all(color: const Color(0xFFE5E7EB)),
                 ),
                 child: Row(
                   children: [
@@ -479,9 +517,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                     const Expanded(
                       child: Text(
                         'Enable reminder',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                        ),
+                        style: TextStyle(fontWeight: FontWeight.w600),
                       ),
                     ),
                     Switch(
@@ -508,10 +544,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                 const SizedBox(height: 20),
                 const Text(
                   'Reminder date & time',
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                  ),
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
                 ),
                 const SizedBox(height: 10),
                 InkWell(
@@ -525,9 +558,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                        color: const Color(0xFFE5E7EB),
-                      ),
+                      border: Border.all(color: const Color(0xFFE5E7EB)),
                     ),
                     child: Row(
                       children: [
@@ -574,10 +605,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
               // Due date
               const Text(
                 'Due date',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                ),
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
               ),
 
               const SizedBox(height: 10),
@@ -593,9 +621,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                   decoration: BoxDecoration(
                     color: Colors.white,
                     borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: const Color(0xFFE5E7EB),
-                    ),
+                    border: Border.all(color: const Color(0xFFE5E7EB)),
                   ),
                   child: Row(
                     children: [
@@ -636,15 +662,10 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                 ),
               ),
 
-
-
               const SizedBox(height: 35),
 
               if (_saveError != null) ...[
-                Text(
-                  _saveError!,
-                  style: const TextStyle(color: Colors.red),
-                ),
+                Text(_saveError!, style: const TextStyle(color: Colors.red)),
                 const SizedBox(height: 12),
               ],
 
@@ -664,7 +685,11 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                         )
                       : const Icon(Icons.add_task_rounded),
                   label: Text(
-                    _isSaving ? 'Saving...' : 'Create Task',
+                    _isSaving
+                        ? 'Saving...'
+                        : widget.task == null
+                        ? 'Create Task'
+                        : 'Save Changes',
                     style: const TextStyle(
                       fontSize: 15,
                       fontWeight: FontWeight.w700,
@@ -684,9 +709,7 @@ class _AddTaskScreenState extends ConsumerState<AddTaskScreen> {
                   },
                   child: const Text(
                     'Cancel',
-                    style: TextStyle(
-                      fontWeight: FontWeight.w600,
-                    ),
+                    style: TextStyle(fontWeight: FontWeight.w600),
                   ),
                 ),
               ),
@@ -733,14 +756,10 @@ class _PriorityButton extends StatelessWidget {
         duration: const Duration(milliseconds: 180),
         height: 48,
         decoration: BoxDecoration(
-          color: selected
-              ? color.withValues(alpha: 0.12)
-              : Colors.white,
+          color: selected ? color.withValues(alpha: 0.12) : Colors.white,
           borderRadius: BorderRadius.circular(13),
           border: Border.all(
-            color: selected
-                ? color
-                : const Color(0xFFE5E7EB),
+            color: selected ? color : const Color(0xFFE5E7EB),
             width: selected ? 1.5 : 1,
           ),
         ),
@@ -748,12 +767,8 @@ class _PriorityButton extends StatelessWidget {
           child: Text(
             priority,
             style: TextStyle(
-              color: selected
-                  ? color
-                  : Colors.grey.shade700,
-              fontWeight: selected
-                  ? FontWeight.w700
-                  : FontWeight.w500,
+              color: selected ? color : Colors.grey.shade700,
+              fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
               fontSize: 13,
             ),
           ),
