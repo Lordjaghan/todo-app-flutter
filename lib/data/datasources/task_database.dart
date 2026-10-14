@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
+import '../models/subtask.dart';
 import '../models/task.dart';
 
 class TaskDatabase {
@@ -16,7 +17,7 @@ class TaskDatabase {
 
     _database = await openDatabase(
       dbPath,
-      version: 5,
+      version: 6,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE tasks (
@@ -25,6 +26,9 @@ class TaskDatabase {
             description TEXT NOT NULL,
             category TEXT NOT NULL,
             priority TEXT NOT NULL,
+            isPinned INTEGER NOT NULL DEFAULT 0,
+            sortOrder INTEGER NOT NULL DEFAULT 0,
+            createdAt INTEGER NOT NULL,
             startDate INTEGER NOT NULL,
             dueDate INTEGER,
             status TEXT NOT NULL DEFAULT 'inProgress',
@@ -34,6 +38,24 @@ class TaskDatabase {
             notificationId INTEGER
           )
         ''');
+        await db.execute('''
+          CREATE TABLE subtasks (
+            id TEXT PRIMARY KEY,
+            parentTaskId TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            dueDate INTEGER,
+            reminderDate INTEGER,
+            reminderEnabled INTEGER NOT NULL DEFAULT 0,
+            reminderType TEXT NOT NULL DEFAULT 'notification',
+            notificationId INTEGER,
+            sortOrder INTEGER NOT NULL DEFAULT 0
+          )
+        ''');
+        await db.execute(
+          'CREATE INDEX subtasks_parent_order ON subtasks(parentTaskId, sortOrder)',
+        );
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -75,6 +97,57 @@ class TaskDatabase {
             SET status = CASE WHEN isCompleted = 1 THEN 'completed' ELSE 'inProgress' END
           ''');
         }
+
+        if (oldVersion < 6) {
+          await db.execute(
+            'ALTER TABLE tasks ADD COLUMN isPinned INTEGER NOT NULL DEFAULT 0',
+          );
+          await db.execute(
+            'ALTER TABLE tasks ADD COLUMN sortOrder INTEGER NOT NULL DEFAULT 0',
+          );
+          await db.execute(
+            'ALTER TABLE tasks ADD COLUMN createdAt INTEGER NOT NULL DEFAULT 0',
+          );
+          await db.execute('UPDATE tasks SET createdAt = startDate');
+          final existingTasks = await db.query(
+            'tasks',
+            columns: ['id'],
+            orderBy: '''
+              CASE status
+                WHEN 'completed' THEN 2
+                WHEN 'onHold' THEN 1
+                ELSE 0
+              END,
+              dueDate ASC
+            ''',
+          );
+          for (var index = 0; index < existingTasks.length; index++) {
+            await db.update(
+              'tasks',
+              {'sortOrder': index},
+              where: 'id = ?',
+              whereArgs: [existingTasks[index]['id']],
+            );
+          }
+          await db.execute('''
+            CREATE TABLE subtasks (
+              id TEXT PRIMARY KEY,
+              parentTaskId TEXT NOT NULL,
+              title TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'pending',
+              dueDate INTEGER,
+              reminderDate INTEGER,
+              reminderEnabled INTEGER NOT NULL DEFAULT 0,
+              reminderType TEXT NOT NULL DEFAULT 'notification',
+              notificationId INTEGER,
+              sortOrder INTEGER NOT NULL DEFAULT 0
+            )
+          ''');
+          await db.execute(
+            'CREATE INDEX subtasks_parent_order ON subtasks(parentTaskId, sortOrder)',
+          );
+        }
       },
     );
 
@@ -86,11 +159,14 @@ class TaskDatabase {
     final rows = await db.query(
       'tasks',
       orderBy: '''
+        isPinned DESC,
         CASE status
           WHEN 'completed' THEN 2
           WHEN 'onHold' THEN 1
           ELSE 0
         END,
+        CASE priority WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END,
+        sortOrder ASC,
         dueDate ASC
       ''',
     );
@@ -108,8 +184,75 @@ class TaskDatabase {
     );
   }
 
+  Future<void> saveTasks(List<Task> tasks) async {
+    final db = await database;
+    await db.transaction((transaction) async {
+      for (final task in tasks) {
+        await transaction.insert(
+          'tasks',
+          task.toMap(),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+    });
+  }
+
+  Future<void> saveTaskAndSubtask(Task task, Subtask subtask) async {
+    final db = await database;
+    await db.transaction((transaction) async {
+      await transaction.insert(
+        'tasks',
+        task.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await transaction.insert(
+        'subtasks',
+        subtask.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    });
+  }
+
   Future<void> deleteTask(String id) async {
     final db = await database;
-    await db.delete('tasks', where: 'id = ?', whereArgs: [id]);
+    await db.transaction((transaction) async {
+      await transaction.delete(
+        'subtasks',
+        where: 'parentTaskId = ?',
+        whereArgs: [id],
+      );
+      await transaction.delete('tasks', where: 'id = ?', whereArgs: [id]);
+    });
+  }
+
+  Future<List<Subtask>> getSubtasks(String parentTaskId) async {
+    final db = await database;
+    final rows = await db.query(
+      'subtasks',
+      where: 'parentTaskId = ?',
+      whereArgs: [parentTaskId],
+      orderBy: 'sortOrder ASC, dueDate ASC',
+    );
+    return rows.map(Subtask.fromMap).toList();
+  }
+
+  Future<List<Subtask>> getAllSubtasks() async {
+    final db = await database;
+    final rows = await db.query('subtasks');
+    return rows.map(Subtask.fromMap).toList();
+  }
+
+  Future<void> saveSubtask(Subtask subtask) async {
+    final db = await database;
+    await db.insert(
+      'subtasks',
+      subtask.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> deleteSubtask(String id) async {
+    final db = await database;
+    await db.delete('subtasks', where: 'id = ?', whereArgs: [id]);
   }
 }

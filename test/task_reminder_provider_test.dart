@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:to_do_app/data/datasources/task_database.dart';
+import 'package:to_do_app/data/models/subtask.dart';
 import 'package:to_do_app/data/models/task.dart';
 import 'package:to_do_app/data/repositories/task_repository.dart';
 import 'package:to_do_app/features/tasks/providers/task_provider.dart';
@@ -212,6 +213,138 @@ void main() {
       expect(scheduler.cancelled, contains(task.reminderNotificationId));
     },
   );
+
+  test('subtasks block parent completion and manage reminders', () async {
+    final database = _MemoryTaskDatabase();
+    final scheduler = _FakeTaskReminderScheduler();
+    final container = ProviderContainer(
+      overrides: [
+        taskRepositoryProvider.overrideWith((ref) => TaskRepository(database)),
+        taskReminderSchedulerProvider.overrideWith((ref) => scheduler),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(taskProvider.future);
+
+    final notifier = container.read(taskProvider.notifier);
+    await notifier.addTask(
+      title: 'Prepare release',
+      startDate: DateTime(2026, 10, 8),
+    );
+    final parent = database.tasks.single;
+    await notifier.addSubtask(
+      parentTask: parent,
+      title: 'Review release notes',
+      reminderEnabled: true,
+      reminderDate: DateTime.now().add(const Duration(hours: 1)),
+    );
+    final subtask = database.subtasks.single;
+    expect(subtask.notificationId, isNot(parent.reminderNotificationId));
+    expect(scheduler.scheduled.single.taskId, subtask.reminderNotificationId);
+
+    final updatedReminderDate = DateTime.now().add(const Duration(hours: 2));
+    await notifier.updateSubtask(
+      subtask.copyWith(reminderDate: updatedReminderDate),
+    );
+    expect(scheduler.scheduled, hasLength(2));
+    expect(scheduler.scheduled.last.reminderDate, updatedReminderDate);
+    expect(scheduler.cancelled, contains(subtask.reminderNotificationId));
+
+    await expectLater(
+      notifier.updateTask(parent.copyWith(status: TaskStatus.completed)),
+      throwsA(isA<IncompleteSubtasksException>()),
+    );
+    await expectLater(
+      notifier.setTaskStatus(parent, TaskStatus.completed),
+      throwsA(isA<IncompleteSubtasksException>()),
+    );
+    expect(database.tasks.single.status, TaskStatus.inProgress);
+
+    await notifier.updateSubtask(
+      subtask.copyWith(status: SubtaskStatus.completed),
+    );
+    expect(scheduler.cancelled, contains(subtask.reminderNotificationId));
+    await notifier.setTaskStatus(database.tasks.single, TaskStatus.completed);
+    expect(database.tasks.single.status, TaskStatus.completed);
+
+    await expectLater(
+      notifier.addSubtask(parentTask: database.tasks.single, title: 'Publish'),
+      throwsA(isA<ParentTaskReopenRequiredException>()),
+    );
+    await notifier.addSubtask(
+      parentTask: database.tasks.single,
+      title: 'Publish',
+      reopenCompletedParent: true,
+    );
+    expect(database.tasks.single.status, TaskStatus.inProgress);
+    expect(database.subtasks, hasLength(2));
+
+    await notifier.addSubtask(
+      parentTask: database.tasks.single,
+      title: 'Publish release',
+      reminderEnabled: true,
+      reminderDate: DateTime.now().add(const Duration(hours: 3)),
+    );
+    final activeReminderId = database.subtasks.last.reminderNotificationId;
+    await notifier.removeTask(parent.id);
+    expect(scheduler.cancelled, contains(activeReminderId));
+    expect(database.subtasks, isEmpty);
+  });
+
+  test(
+    'pin and ordering updates persist without rescheduling reminders',
+    () async {
+      final database = _MemoryTaskDatabase();
+      final scheduler = _FakeTaskReminderScheduler();
+      final container = ProviderContainer(
+        overrides: [
+          taskRepositoryProvider.overrideWith(
+            (ref) => TaskRepository(database),
+          ),
+          taskReminderSchedulerProvider.overrideWith((ref) => scheduler),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(taskProvider.future);
+
+      final notifier = container.read(taskProvider.notifier);
+      await notifier.addTask(
+        title: 'First',
+        startDate: DateTime(2026, 10, 8),
+        priority: 'High',
+      );
+      await notifier.addTask(
+        title: 'Second',
+        startDate: DateTime(2026, 10, 8),
+        priority: 'Low',
+      );
+      final first = database.tasks.firstWhere((task) => task.title == 'First');
+      final second = database.tasks.firstWhere(
+        (task) => task.title == 'Second',
+      );
+
+      await notifier.setTaskPinned(first, true);
+      await notifier.saveTaskOrder([
+        second,
+        first.copyWith(priority: 'Medium'),
+      ]);
+
+      expect(
+        database.tasks.firstWhere((task) => task.id == first.id).isPinned,
+        isTrue,
+      );
+      expect(
+        database.tasks.firstWhere((task) => task.id == first.id).priority,
+        'Medium',
+      );
+      expect(
+        database.tasks.firstWhere((task) => task.id == second.id).sortOrder,
+        0,
+      );
+      expect(scheduler.scheduled, isEmpty);
+      expect(scheduler.cancelled, isEmpty);
+    },
+  );
 }
 
 class _ScheduledReminder {
@@ -270,9 +403,18 @@ class _FakeTaskReminderScheduler implements TaskReminderScheduler {
 
 class _MemoryTaskDatabase extends TaskDatabase {
   final List<Task> tasks = [];
+  final List<Subtask> subtasks = [];
 
   @override
   Future<List<Task>> getTasks() async => List.of(tasks);
+
+  @override
+  Future<List<Subtask>> getSubtasks(String parentTaskId) async => subtasks
+      .where((subtask) => subtask.parentTaskId == parentTaskId)
+      .toList();
+
+  @override
+  Future<List<Subtask>> getAllSubtasks() async => List.of(subtasks);
 
   @override
   Future<void> saveTask(Task task) async {
@@ -281,7 +423,32 @@ class _MemoryTaskDatabase extends TaskDatabase {
   }
 
   @override
+  Future<void> saveTasks(List<Task> updatedTasks) async {
+    for (final task in updatedTasks) {
+      await saveTask(task);
+    }
+  }
+
+  @override
+  Future<void> saveSubtask(Subtask subtask) async {
+    subtasks.removeWhere((savedSubtask) => savedSubtask.id == subtask.id);
+    subtasks.add(subtask);
+  }
+
+  @override
+  Future<void> saveTaskAndSubtask(Task task, Subtask subtask) async {
+    await saveTask(task);
+    await saveSubtask(subtask);
+  }
+
+  @override
+  Future<void> deleteSubtask(String id) async {
+    subtasks.removeWhere((subtask) => subtask.id == id);
+  }
+
+  @override
   Future<void> deleteTask(String id) async {
     tasks.removeWhere((task) => task.id == id);
+    subtasks.removeWhere((subtask) => subtask.parentTaskId == id);
   }
 }

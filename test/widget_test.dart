@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:to_do_app/data/datasources/task_database.dart';
+import 'package:to_do_app/data/models/subtask.dart';
 import 'package:to_do_app/data/models/task.dart';
 import 'package:to_do_app/data/repositories/task_repository.dart';
 import 'package:to_do_app/features/tasks/providers/task_provider.dart';
@@ -251,6 +252,98 @@ void main() {
     );
   });
 
+  testWidgets('pinning a task keeps it in the pinned section', (tester) async {
+    final task = Task(
+      id: 'pin-task',
+      title: 'Pinned task',
+      startDate: DateTime(2026, 10, 8),
+    );
+    final database = _MemoryTaskDatabase()..tasks.add(task);
+    await tester.pumpWidget(_testApp(database));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Pin task'));
+    await tester.pumpAndSettle();
+
+    expect(database.tasks.single.isPinned, isTrue);
+    expect(find.text('Pinned'), findsOneWidget);
+    expect(find.byTooltip('Unpin task'), findsOneWidget);
+  });
+
+  testWidgets('dragging a task into another priority updates its priority', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(900, 1500);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    final database = _MemoryTaskDatabase()
+      ..tasks.addAll([
+        Task(
+          id: 'high-task',
+          title: 'High priority task',
+          priority: 'High',
+          startDate: DateTime(2026, 10, 8),
+        ),
+        Task(
+          id: 'low-task',
+          title: 'Low priority task',
+          priority: 'Low',
+          startDate: DateTime(2026, 10, 8),
+        ),
+      ]);
+    await tester.pumpWidget(_testApp(database));
+    await tester.pumpAndSettle();
+
+    final start = tester.getCenter(find.text('High priority task'));
+    final target = tester.getCenter(find.text('Low priority task'));
+    final gesture = await tester.startGesture(start);
+    await tester.pump(const Duration(milliseconds: 600));
+    final distance = target.dy - start.dy;
+    for (var step = 1; step <= 6; step++) {
+      await gesture.moveTo(start + Offset(0, distance * step / 6));
+      await tester.pump(const Duration(milliseconds: 80));
+    }
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(
+      database.tasks.firstWhere((task) => task.id == 'high-task').priority,
+      'Low',
+    );
+  });
+
+  testWidgets('create and update a subtask from the task card', (tester) async {
+    final task = Task(
+      id: 'parent-task',
+      title: 'Parent task',
+      startDate: DateTime(2026, 10, 8),
+    );
+    final database = _MemoryTaskDatabase()..tasks.add(task);
+    await tester.pumpWidget(_testApp(database));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Add subtask'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField).first, 'Review notes');
+    await tester.tap(find.text('Add subtask').last);
+    await tester.pumpAndSettle();
+
+    expect(database.subtasks.single.title, 'Review notes');
+    await tester.tap(find.text('1 subtask'));
+    await tester.pumpAndSettle();
+    expect(find.text('Review notes'), findsOneWidget);
+    expect(find.text('0/1 completed'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Change subtask status'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Completed').last);
+    await tester.pumpAndSettle();
+
+    expect(database.subtasks.single.status, SubtaskStatus.completed);
+    expect(find.text('1/1 completed'), findsOneWidget);
+  });
+
   testWidgets('changing to on hold asks before saving without a reminder', (
     tester,
   ) async {
@@ -293,10 +386,19 @@ String _formatDate(DateTime date) {
 
 class _MemoryTaskDatabase extends TaskDatabase {
   final List<Task> tasks = [];
+  final List<Subtask> subtasks = [];
   bool failSave = false;
 
   @override
   Future<List<Task>> getTasks() async => List.of(tasks);
+
+  @override
+  Future<List<Subtask>> getSubtasks(String parentTaskId) async => subtasks
+      .where((subtask) => subtask.parentTaskId == parentTaskId)
+      .toList();
+
+  @override
+  Future<List<Subtask>> getAllSubtasks() async => List.of(subtasks);
 
   @override
   Future<void> saveTask(Task task) async {
@@ -306,7 +408,32 @@ class _MemoryTaskDatabase extends TaskDatabase {
   }
 
   @override
+  Future<void> saveTasks(List<Task> updatedTasks) async {
+    for (final task in updatedTasks) {
+      await saveTask(task);
+    }
+  }
+
+  @override
+  Future<void> saveSubtask(Subtask subtask) async {
+    subtasks.removeWhere((savedSubtask) => savedSubtask.id == subtask.id);
+    subtasks.add(subtask);
+  }
+
+  @override
+  Future<void> saveTaskAndSubtask(Task task, Subtask subtask) async {
+    await saveTask(task);
+    await saveSubtask(subtask);
+  }
+
+  @override
+  Future<void> deleteSubtask(String id) async {
+    subtasks.removeWhere((subtask) => subtask.id == id);
+  }
+
+  @override
   Future<void> deleteTask(String id) async {
     tasks.removeWhere((task) => task.id == id);
+    subtasks.removeWhere((subtask) => subtask.parentTaskId == id);
   }
 }

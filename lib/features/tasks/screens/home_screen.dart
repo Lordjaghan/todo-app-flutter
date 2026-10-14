@@ -3,10 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 import '../../../core/theme/app_theme.dart';
+import '../../../data/models/subtask.dart';
 import '../../../data/models/task.dart';
 import '../../../services/notification_services.dart';
 import '../providers/task_provider.dart';
 import '../widgets/task_card.dart';
+import '../widgets/subtask_editor_sheet.dart';
 import 'add_task_screen.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
@@ -18,6 +20,9 @@ class HomeScreen extends ConsumerStatefulWidget {
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   String _selectedFilter = 'All';
+  String _selectedSort = 'Priority';
+
+  final List<String> _sortOptions = ['Priority', 'Due date', 'Creation date'];
 
   final List<String> _filters = [
     'All',
@@ -56,7 +61,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             'Delete task?',
             style: TextStyle(fontWeight: FontWeight.w700),
           ),
-          content: Text('Are you sure you want to delete "${task.title}"?'),
+          content: Text(
+            'Are you sure you want to delete "${task.title}" and all of its subtasks and reminders?',
+          ),
           actions: [
             TextButton(
               onPressed: () {
@@ -87,7 +94,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     if (status == task.status) return;
     final notifier = ref.read(taskProvider.notifier);
     if (status == TaskStatus.completed) {
-      await notifier.setTaskStatus(task, status);
+      try {
+        await notifier.setTaskStatus(task, status);
+      } on IncompleteSubtasksException catch (error) {
+        _showMessage(
+          'Complete the remaining ${error.remainingCount} subtasks first.',
+        );
+      } catch (error) {
+        _showTaskError(error);
+      }
       return;
     }
 
@@ -177,6 +192,264 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           const SnackBar(content: Text('Saved without a notification.')),
         );
       }
+    } catch (error) {
+      _showTaskError(error);
+    }
+  }
+
+  Future<bool> _confirmReopenParent(Task task) async {
+    final shouldReopen = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Reopen parent task?'),
+        content: Text(
+          '"${task.title}" is completed. Reopen it before saving this incomplete subtask?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Reopen task'),
+          ),
+        ],
+      ),
+    );
+    return shouldReopen == true;
+  }
+
+  Future<void> _addSubtask(Task task) async {
+    final subtask = await showSubtaskEditor(context, parentTask: task);
+    if (!mounted || subtask == null) return;
+    final reopenParent =
+        task.status == TaskStatus.completed && !subtask.isCompleted;
+    if (reopenParent && !await _confirmReopenParent(task)) return;
+
+    try {
+      await ref
+          .read(taskProvider.notifier)
+          .addSubtask(
+            parentTask: task,
+            title: subtask.title,
+            description: subtask.description,
+            status: subtask.status,
+            dueDate: subtask.dueDate,
+            reminderEnabled: subtask.reminderEnabled,
+            reminderDate: subtask.reminderDate,
+            reminderType: subtask.reminderType,
+            reopenCompletedParent: reopenParent,
+          );
+    } catch (error) {
+      _showTaskError(error);
+    }
+  }
+
+  Future<void> _editSubtask(Task task, Subtask subtask) async {
+    final updated = await showSubtaskEditor(
+      context,
+      parentTask: task,
+      subtask: subtask,
+    );
+    if (!mounted || updated == null) return;
+    await _saveSubtaskChange(task, updated);
+  }
+
+  Future<void> _changeSubtaskStatus(Task task, Subtask subtask) async {
+    await _saveSubtaskChange(task, subtask);
+  }
+
+  Future<void> _saveSubtaskChange(Task task, Subtask subtask) async {
+    final reopenParent =
+        task.status == TaskStatus.completed && !subtask.isCompleted;
+    if (reopenParent && !await _confirmReopenParent(task)) return;
+    try {
+      await ref
+          .read(taskProvider.notifier)
+          .updateSubtask(subtask, reopenCompletedParent: reopenParent);
+    } catch (error) {
+      _showTaskError(error);
+    }
+  }
+
+  Future<void> _deleteSubtask(Subtask subtask) async {
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete subtask?'),
+        content: Text('Delete "${subtask.title}"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (shouldDelete != true || !mounted) return;
+    try {
+      await ref.read(taskProvider.notifier).removeSubtask(subtask);
+    } catch (error) {
+      _showTaskError(error);
+    }
+  }
+
+  Future<void> _toggleTaskPin(Task task) async {
+    try {
+      await ref.read(taskProvider.notifier).setTaskPinned(task, !task.isPinned);
+    } catch (error) {
+      _showTaskError(error);
+    }
+  }
+
+  Future<void> _reorderTasks(
+    List<Task> displayedTasks,
+    int oldIndex,
+    int newIndex, {
+    required bool updatePriority,
+  }) async {
+    if (newIndex < 0 || newIndex > displayedTasks.length - 1) return;
+    final reordered = List<Task>.of(displayedTasks);
+    final moved = reordered.removeAt(oldIndex);
+    final targetIndex = newIndex.clamp(0, reordered.length);
+    final destinationPriority = reordered.isEmpty
+        ? moved.priority
+        : reordered[targetIndex == reordered.length
+                  ? targetIndex - 1
+                  : targetIndex]
+              .priority;
+    reordered.insert(
+      targetIndex,
+      moved.copyWith(
+        priority: updatePriority ? destinationPriority : moved.priority,
+      ),
+    );
+    try {
+      await ref.read(taskProvider.notifier).saveTaskOrder(reordered);
+    } catch (error) {
+      _showTaskError(error);
+    }
+  }
+
+  List<Task> _sortTasks(List<Task> tasks) {
+    final sorted = List<Task>.of(tasks);
+    sorted.sort((first, second) {
+      if (_selectedSort == 'Due date') {
+        if (first.dueDate == null && second.dueDate != null) return 1;
+        if (second.dueDate == null && first.dueDate != null) return -1;
+        final byDueDate = (first.dueDate ?? first.createdAt).compareTo(
+          second.dueDate ?? second.createdAt,
+        );
+        if (byDueDate != 0) return byDueDate;
+      } else if (_selectedSort == 'Creation date') {
+        final byCreatedAt = second.createdAt.compareTo(first.createdAt);
+        if (byCreatedAt != 0) return byCreatedAt;
+      } else {
+        const priorityOrder = {'High': 0, 'Medium': 1, 'Low': 2};
+        final byPriority = (priorityOrder[first.priority] ?? 1).compareTo(
+          priorityOrder[second.priority] ?? 1,
+        );
+        if (byPriority != 0) return byPriority;
+        final byManualOrder = first.sortOrder.compareTo(second.sortOrder);
+        if (byManualOrder != 0) return byManualOrder;
+      }
+      return first.title.toLowerCase().compareTo(second.title.toLowerCase());
+    });
+    return sorted;
+  }
+
+  Widget _buildTaskCard(
+    Task task, {
+    int? dragIndex,
+    bool showPriority = false,
+  }) {
+    final card = Consumer(
+      builder: (context, ref, _) {
+        final subtasksAsync = ref.watch(subtasksProvider(task.id));
+        final subtasks = subtasksAsync.when(
+          data: (value) => value,
+          loading: () => const <Subtask>[],
+          error: (_, _) => const <Subtask>[],
+        );
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (showPriority)
+              Padding(
+                padding: const EdgeInsets.only(left: 4, bottom: 7),
+                child: Text(
+                  '${task.priority} priority',
+                  style: const TextStyle(
+                    color: Colors.grey,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            TaskCard(
+              task: task,
+              onEdit: () => _openEditTaskScreen(task),
+              onStatusChanged: (status) => _changeTaskStatus(task, status),
+              onDelete: () => _deleteTask(task),
+              onTogglePin: () => _toggleTaskPin(task),
+              subtasks: subtasks,
+              subtasksLoading: subtasksAsync.isLoading,
+              subtaskError: subtasksAsync.hasError
+                  ? 'Could not load subtasks.'
+                  : null,
+              onRetrySubtasks: () => ref.invalidate(subtasksProvider(task.id)),
+              onAddSubtask: () => _addSubtask(task),
+              onEditSubtask: (subtask) => _editSubtask(task, subtask),
+              onDeleteSubtask: _deleteSubtask,
+              onSubtaskChanged: (subtask) =>
+                  _changeSubtaskStatus(task, subtask),
+            ),
+          ],
+        );
+      },
+    );
+    final padded = Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: card,
+    );
+    if (dragIndex == null) {
+      return Padding(
+        key: ValueKey(task.id),
+        padding: EdgeInsets.zero,
+        child: padded,
+      );
+    }
+    return ReorderableDelayedDragStartListener(
+      key: ValueKey(task.id),
+      index: dragIndex,
+      child: padded,
+    );
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _showTaskError(Object error) {
+    if (error is ReminderDateRequiredException) {
+      _showMessage('Select a reminder date and time.');
+    } else if (error is ReminderTimeInPastException) {
+      _showMessage('Choose a reminder time in the future.');
+    } else if (error is NotificationPermissionDeniedException) {
+      _showMessage('Notification permission was denied.');
+    } else if (error is ExactAlarmPermissionDeniedException) {
+      _showMessage('Exact alarm permission was denied.');
+    } else if (error is ParentTaskReopenRequiredException) {
+      _showMessage('Reopen the parent task before saving this subtask.');
+    } else {
+      _showMessage('Could not save the change. Please try again.');
     }
   }
 
@@ -231,6 +504,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 : completedTasks / tasks.length;
 
             final filteredTasks = _filteredTasks(tasks);
+            final pinnedTasks = _sortTasks(
+              filteredTasks.where((task) => task.isPinned).toList(),
+            );
+            final regularTasks = _sortTasks(
+              filteredTasks.where((task) => !task.isPinned).toList(),
+            );
+            final canReorder =
+                _selectedSort == 'Priority' && _selectedFilter == 'All';
 
             return RefreshIndicator(
               color: AppTheme.primary,
@@ -526,6 +807,36 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                               fontWeight: FontWeight.w500,
                             ),
                           ),
+                          const SizedBox(width: 8),
+                          PopupMenuButton<String>(
+                            tooltip: 'Sort tasks',
+                            onSelected: (sort) {
+                              setState(() => _selectedSort = sort);
+                            },
+                            itemBuilder: (context) => _sortOptions
+                                .map(
+                                  (sort) => PopupMenuItem<String>(
+                                    value: sort,
+                                    child: Text(sort),
+                                  ),
+                                )
+                                .toList(),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.sort_rounded, size: 19),
+                                const SizedBox(width: 4),
+                                Text(
+                                  _selectedSort,
+                                  style: const TextStyle(
+                                    color: AppTheme.primary,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -610,36 +921,125 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         onAddTask: _openAddTaskScreen,
                       ),
                     )
-                  else
-                    SliverPadding(
-                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 110),
-
-                      sliver: SliverList(
-                        delegate: SliverChildBuilderDelegate((context, index) {
-                          final task = filteredTasks[index];
-
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 12),
-
-                            child: TaskCard(
-                              task: task,
-
-                              onEdit: () {
-                                _openEditTaskScreen(task);
-                              },
-
-                              onStatusChanged: (status) {
-                                _changeTaskStatus(task, status);
-                              },
-
-                              onDelete: () {
-                                _deleteTask(task);
-                              },
-                            ),
-                          );
-                        }, childCount: filteredTasks.length),
+                  else ...[
+                    if (pinnedTasks.isNotEmpty) ...[
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(20, 18, 20, 0),
+                        sliver: SliverToBoxAdapter(
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.push_pin_rounded,
+                                size: 16,
+                                color: AppTheme.primary,
+                              ),
+                              const SizedBox(width: 6),
+                              const Expanded(
+                                child: Text(
+                                  'Pinned',
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                '${pinnedTasks.length}',
+                                style: const TextStyle(
+                                  color: Colors.grey,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
-                    ),
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
+                        sliver: canReorder
+                            ? SliverToBoxAdapter(
+                                child: ReorderableListView.builder(
+                                  shrinkWrap: true,
+                                  physics: const NeverScrollableScrollPhysics(),
+                                  buildDefaultDragHandles: false,
+                                  itemCount: pinnedTasks.length,
+                                  onReorderItem: (oldIndex, newIndex) =>
+                                      _reorderTasks(
+                                        pinnedTasks,
+                                        oldIndex,
+                                        newIndex,
+                                        updatePriority: false,
+                                      ),
+                                  itemBuilder: (context, index) =>
+                                      _buildTaskCard(
+                                        pinnedTasks[index],
+                                        dragIndex: index,
+                                      ),
+                                ),
+                              )
+                            : SliverList.builder(
+                                itemCount: pinnedTasks.length,
+                                itemBuilder: (context, index) =>
+                                    _buildTaskCard(pinnedTasks[index]),
+                              ),
+                      ),
+                    ],
+                    if (regularTasks.isNotEmpty) ...[
+                      SliverPadding(
+                        padding: EdgeInsets.fromLTRB(
+                          20,
+                          pinnedTasks.isEmpty ? 16 : 22,
+                          20,
+                          0,
+                        ),
+                        sliver: SliverToBoxAdapter(
+                          child: Text(
+                            pinnedTasks.isEmpty ? 'Tasks' : 'Other tasks',
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ),
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(20, 10, 20, 110),
+                        sliver: canReorder
+                            ? SliverToBoxAdapter(
+                                child: ReorderableListView.builder(
+                                  shrinkWrap: true,
+                                  physics: const NeverScrollableScrollPhysics(),
+                                  buildDefaultDragHandles: false,
+                                  itemCount: regularTasks.length,
+                                  onReorderItem: (oldIndex, newIndex) =>
+                                      _reorderTasks(
+                                        regularTasks,
+                                        oldIndex,
+                                        newIndex,
+                                        updatePriority: true,
+                                      ),
+                                  itemBuilder: (context, index) {
+                                    final task = regularTasks[index];
+                                    final startsPriorityGroup =
+                                        index == 0 ||
+                                        regularTasks[index - 1].priority !=
+                                            task.priority;
+                                    return _buildTaskCard(
+                                      task,
+                                      dragIndex: index,
+                                      showPriority: startsPriorityGroup,
+                                    );
+                                  },
+                                ),
+                              )
+                            : SliverList.builder(
+                                itemCount: regularTasks.length,
+                                itemBuilder: (context, index) =>
+                                    _buildTaskCard(regularTasks[index]),
+                              ),
+                      ),
+                    ],
+                  ],
                 ],
               ),
             );
