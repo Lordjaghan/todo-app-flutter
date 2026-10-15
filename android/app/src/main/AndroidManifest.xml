@@ -8,7 +8,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <application
-        android:label="to_do_app"
+        android:label="ToDo"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

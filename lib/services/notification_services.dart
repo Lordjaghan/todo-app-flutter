@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
+import 'package:to_do_app/data/models/activity.dart';
 import 'package:to_do_app/data/models/task.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
@@ -25,13 +26,29 @@ abstract interface class TaskReminderScheduler {
   Future<void> cancelTaskReminder(int taskId);
 }
 
+abstract interface class ActivityReminderScheduler {
+  bool get supportsActivityReminders;
+
+  Future<void> scheduleActivityReminder({
+    required int reminderId,
+    required String title,
+    required String time,
+    required ActivityPeriod period,
+  });
+
+  Future<void> cancelActivityReminder(int reminderId);
+}
+
 class NotificationPermissionDeniedException implements Exception {}
 
 class ExactAlarmPermissionDeniedException implements Exception {}
 
 class ReminderTimeInPastException implements Exception {}
 
-class NotificationService implements TaskReminderScheduler {
+class ActivityReminderUnsupportedException implements Exception {}
+
+class NotificationService
+    implements TaskReminderScheduler, ActivityReminderScheduler {
   static final NotificationService instance = NotificationService._internal();
   static const _alarmMethodChannel = MethodChannel('to_do_app/task_alarm');
   static const _alarmCategoryId = 'TASK_ALARM';
@@ -129,7 +146,12 @@ class NotificationService implements TaskReminderScheduler {
       onDidReceiveNotificationResponse: _onNotificationResponse,
     );
 
-    final launchDetails = await notifications.getNotificationAppLaunchDetails();
+    NotificationAppLaunchDetails? launchDetails;
+    try {
+      launchDetails = await notifications.getNotificationAppLaunchDetails();
+    } on UnimplementedError {
+      launchDetails = null;
+    }
     if (launchDetails?.didNotificationLaunchApp ?? false) {
       final response = launchDetails?.notificationResponse;
       if (response != null) await _handleNotificationAction(response);
@@ -234,6 +256,76 @@ class NotificationService implements TaskReminderScheduler {
       }),
       androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
     );
+  }
+
+  @override
+  bool get supportsActivityReminders =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
+  @visibleForTesting
+  static DateTime nextActivityReminderDate(
+    DateTime now,
+    String time,
+    ActivityPeriod period,
+  ) {
+    final values = time.split(':');
+    final hour = int.parse(values[0]);
+    final minute = int.parse(values[1]);
+    var date = DateTime(now.year, now.month, now.day, hour, minute);
+    if (period == ActivityPeriod.weekly) {
+      final daysUntilMonday = (DateTime.monday - now.weekday + 7) % 7;
+      date = date.add(Duration(days: daysUntilMonday));
+      if (!date.isAfter(now)) date = date.add(const Duration(days: 7));
+      return date;
+    }
+    if (!date.isAfter(now)) date = date.add(const Duration(days: 1));
+    return date;
+  }
+
+  @override
+  Future<void> scheduleActivityReminder({
+    required int reminderId,
+    required String title,
+    required String time,
+    required ActivityPeriod period,
+  }) async {
+    if (!supportsActivityReminders) {
+      throw ActivityReminderUnsupportedException();
+    }
+    if (!await requestPermissions()) {
+      throw NotificationPermissionDeniedException();
+    }
+    if (!await requestExactAlarmPermission()) {
+      throw ExactAlarmPermissionDeniedException();
+    }
+    final next = nextActivityReminderDate(DateTime.now(), time, period);
+    await notifications.zonedSchedule(
+      id: reminderId,
+      title: title,
+      body: 'Time for your habit.',
+      scheduledDate: tz.TZDateTime.from(next, tz.local),
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'activity_reminders',
+          'Activity reminders',
+          channelDescription: 'Daily and weekly habit reminders',
+          importance: Importance.defaultImportance,
+          priority: Priority.defaultPriority,
+        ),
+        iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true),
+      ),
+      matchDateTimeComponents: period == ActivityPeriod.daily
+          ? DateTimeComponents.time
+          : DateTimeComponents.dayOfWeekAndTime,
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+    );
+  }
+
+  @override
+  Future<void> cancelActivityReminder(int reminderId) async {
+    await notifications.cancel(id: reminderId);
   }
 
   @override

@@ -1,17 +1,31 @@
-# to_do_app
+# To-Do App
 
-A new Flutter project.
+A local-first Flutter productivity app with task/subtask management and a separate Activity dashboard for habits, sessions, routines, calendar, and reports.
 
-## Getting Started
+## Run Locally
 
-This project is a starting point for a Flutter application.
+```sh
+flutter pub get
+flutter run -d linux
+```
 
-A few resources to get you started if this is your first Flutter project:
+Use `flutter devices` to choose another available target.
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+## Verify
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```sh
+flutter test
+flutter analyze
+```
+
+## Project Guide
+
+See [PROJECT_REPORT.md](PROJECT_REPORT.md) for the architecture, data model, current capabilities and limitations, and a detailed process for planning, implementing, and testing new features in this codebase.
+
+## Entry Points
+
+- [lib/main.dart](lib/main.dart): initialization, theme, and app startup.
+- [lib/features/navigation/app_shell.dart](lib/features/navigation/app_shell.dart): responsive To-Do and Activity navigation.
+- [lib/data/datasources/task_database.dart](lib/data/datasources/task_database.dart): SQLite schema and migrations.
+- [lib/features/tasks/providers/task_provider.dart](lib/features/tasks/providers/task_provider.dart): task state and task workflows.
+- [lib/features/activity/providers/activity_provider.dart](lib/features/activity/providers/activity_provider.dart): activity state and workflows.

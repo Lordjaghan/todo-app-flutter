@@ -2,9 +2,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:to_do_app/data/datasources/task_database.dart';
+import 'package:to_do_app/data/models/activity.dart';
 import 'package:to_do_app/data/models/subtask.dart';
 import 'package:to_do_app/data/models/task.dart';
 import 'package:to_do_app/data/repositories/task_repository.dart';
+import 'package:to_do_app/data/repositories/activity_repository.dart';
+import 'package:to_do_app/features/activity/providers/activity_provider.dart';
 import 'package:to_do_app/features/tasks/providers/task_provider.dart';
 import 'package:to_do_app/services/notification_services.dart';
 
@@ -47,6 +50,44 @@ void main() {
       expect(
         NotificationService.snoozedReminderDate(currentTime),
         currentTime.add(const Duration(minutes: 5)),
+      );
+    });
+
+    test('finds the next daily reminder without scheduling in the past', () {
+      expect(
+        NotificationService.nextActivityReminderDate(
+          DateTime(2026, 10, 14, 9),
+          '09:30',
+          ActivityPeriod.daily,
+        ),
+        DateTime(2026, 10, 14, 9, 30),
+      );
+      expect(
+        NotificationService.nextActivityReminderDate(
+          DateTime(2026, 10, 14, 10),
+          '09:30',
+          ActivityPeriod.daily,
+        ),
+        DateTime(2026, 10, 15, 9, 30),
+      );
+    });
+
+    test('weekly reminders recur on Monday at the configured time', () {
+      expect(
+        NotificationService.nextActivityReminderDate(
+          DateTime(2026, 10, 14, 10),
+          '08:30',
+          ActivityPeriod.weekly,
+        ),
+        DateTime(2026, 10, 19, 8, 30),
+      );
+      expect(
+        NotificationService.nextActivityReminderDate(
+          DateTime(2026, 10, 19, 10),
+          '08:30',
+          ActivityPeriod.weekly,
+        ),
+        DateTime(2026, 10, 26, 8, 30),
       );
     });
   });
@@ -345,6 +386,75 @@ void main() {
       expect(scheduler.cancelled, isEmpty);
     },
   );
+
+  test(
+    'habit reminders use stable separate IDs and archive cancellation',
+    () async {
+      final database = _MemoryTaskDatabase();
+      final scheduler = _FakeActivityReminderScheduler();
+      final container = ProviderContainer(
+        overrides: [
+          activityRepositoryProvider.overrideWith(
+            (ref) => ActivityRepository(database),
+          ),
+          activityReminderSchedulerProvider.overrideWith((ref) => scheduler),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(activityProvider.future);
+
+      final notifier = container.read(activityProvider.notifier);
+      final scheduled = await notifier.saveHabit(
+        title: 'Read',
+        description: '',
+        period: ActivityPeriod.daily,
+        targetCount: 1,
+        reminderTime: '08:30',
+      );
+      final habit = database.habits.single;
+
+      expect(scheduled, isTrue);
+      expect(habit.reminderNotificationId, isNegative);
+      expect(
+        scheduler.scheduled.single.reminderId,
+        habit.reminderNotificationId,
+      );
+      await notifier.archiveHabit(habit, true);
+      expect(scheduler.cancelled, contains(habit.reminderNotificationId));
+      expect(database.habits.single.archived, isTrue);
+    },
+  );
+
+  test(
+    'unsupported activity reminders do not block habit persistence',
+    () async {
+      final database = _MemoryTaskDatabase();
+      final scheduler = _FakeActivityReminderScheduler()..supports = false;
+      final container = ProviderContainer(
+        overrides: [
+          activityRepositoryProvider.overrideWith(
+            (ref) => ActivityRepository(database),
+          ),
+          activityReminderSchedulerProvider.overrideWith((ref) => scheduler),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(activityProvider.future);
+
+      final scheduled = await container
+          .read(activityProvider.notifier)
+          .saveHabit(
+            title: 'Stretch',
+            description: '',
+            period: ActivityPeriod.weekly,
+            targetCount: 3,
+            reminderTime: '09:00',
+          );
+
+      expect(scheduled, isFalse);
+      expect(database.habits.single.title, 'Stretch');
+    },
+  );
 }
 
 class _ScheduledReminder {
@@ -401,9 +511,55 @@ class _FakeTaskReminderScheduler implements TaskReminderScheduler {
   }
 }
 
+class _ScheduledActivityReminder {
+  const _ScheduledActivityReminder({
+    required this.reminderId,
+    required this.title,
+    required this.time,
+    required this.period,
+  });
+
+  final int reminderId;
+  final String title;
+  final String time;
+  final ActivityPeriod period;
+}
+
+class _FakeActivityReminderScheduler implements ActivityReminderScheduler {
+  final List<_ScheduledActivityReminder> scheduled = [];
+  final List<int> cancelled = [];
+  bool supports = true;
+
+  @override
+  bool get supportsActivityReminders => supports;
+
+  @override
+  Future<void> scheduleActivityReminder({
+    required int reminderId,
+    required String title,
+    required String time,
+    required ActivityPeriod period,
+  }) async {
+    scheduled.add(
+      _ScheduledActivityReminder(
+        reminderId: reminderId,
+        title: title,
+        time: time,
+        period: period,
+      ),
+    );
+  }
+
+  @override
+  Future<void> cancelActivityReminder(int reminderId) async {
+    cancelled.add(reminderId);
+  }
+}
+
 class _MemoryTaskDatabase extends TaskDatabase {
   final List<Task> tasks = [];
   final List<Subtask> subtasks = [];
+  final List<Habit> habits = [];
 
   @override
   Future<List<Task>> getTasks() async => List.of(tasks);
@@ -451,4 +607,40 @@ class _MemoryTaskDatabase extends TaskDatabase {
     tasks.removeWhere((task) => task.id == id);
     subtasks.removeWhere((subtask) => subtask.parentTaskId == id);
   }
+
+  @override
+  Future<List<Habit>> getHabits() async => List.of(habits);
+
+  @override
+  Future<void> saveHabit(Habit habit) async {
+    habits.removeWhere((saved) => saved.id == habit.id);
+    habits.add(habit);
+  }
+
+  @override
+  Future<List<HabitCheckIn>> getHabitCheckIns({
+    String? startDay,
+    String? endDay,
+  }) async => [];
+
+  @override
+  Future<List<ActivitySession>> getActivitySessions({
+    String? startDay,
+    String? endDay,
+  }) async => [];
+
+  @override
+  Future<List<Routine>> getRoutines() async => [];
+
+  @override
+  Future<List<RoutineStep>> getRoutineSteps() async => [];
+
+  @override
+  Future<List<RoutineStepCheckIn>> getRoutineStepCheckIns({
+    String? startDay,
+    String? endDay,
+  }) async => [];
+
+  @override
+  Future<List<ActivityGoal>> getActivityGoals() async => [];
 }

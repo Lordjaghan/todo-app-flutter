@@ -5,7 +5,7 @@ import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'core/theme/app_theme.dart';
-import 'features/tasks/screens/home_screen.dart';
+import 'features/navigation/app_shell.dart';
 import 'services/notification_services.dart';
 
 Future<void> main() async {
@@ -30,7 +30,7 @@ class TodoApp extends StatelessWidget {
       title: 'My Tasks',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
-      home: const HomeScreen(),
+      home: const AppShell(),
     );
   }
 }
